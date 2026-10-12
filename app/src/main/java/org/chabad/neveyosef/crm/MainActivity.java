@@ -4,6 +4,8 @@ import android.Manifest;
 import android.app.AlertDialog;
 import android.app.DownloadManager;
 import android.content.ActivityNotFoundException;
+import android.content.ContentResolver;
+import android.content.ContentValues;
 import android.content.Context;
 import android.content.Intent;
 import android.content.SharedPreferences;
@@ -13,9 +15,12 @@ import android.graphics.Color;
 import android.net.ConnectivityManager;
 import android.net.NetworkCapabilities;
 import android.net.Uri;
+import android.os.Build;
 import android.os.Bundle;
 import android.os.Environment;
+import android.provider.MediaStore;
 import android.text.InputType;
+import android.util.Base64;
 import android.view.Gravity;
 import android.view.View;
 import android.view.ViewGroup;
@@ -53,6 +58,12 @@ import androidx.core.view.WindowCompat;
 import androidx.core.view.WindowInsetsCompat;
 import androidx.core.view.WindowInsetsControllerCompat;
 
+import org.json.JSONObject;
+
+import java.io.File;
+import java.io.FileOutputStream;
+import java.io.IOException;
+import java.io.OutputStream;
 import java.util.Locale;
 import java.util.Map;
 
@@ -333,9 +344,7 @@ public class MainActivity extends ComponentActivity {
 
         CookieManager cookies = CookieManager.getInstance();
         cookies.setAcceptCookie(true);
-        // דרוש לשרתי AI Studio / Cloud Run, שבודקים עוגיית אבטחה של צד שלישי ("Cookie check").
-        // הדף הראשי עצמו מוגבל לדומיין המוגדר בלבד (ראה isTrusted).
-        cookies.setAcceptThirdPartyCookies(wv, true);
+        cookies.setAcceptThirdPartyCookies(wv, false);
 
         wv.addJavascriptInterface(new NativeBridge(), BRIDGE_NAME);
         wv.setWebViewClient(new CrmWebViewClient());
@@ -486,7 +495,12 @@ public class MainActivity extends ComponentActivity {
     private void handleDownload(String url, String userAgent, String contentDisposition,
                                 String mimeType, long contentLength) {
         Uri uri = Uri.parse(url);
-        // עוגיות נשלחות רק לדומיין המוגדר; blob:/data: אינם נתמכים ב-DownloadManager.
+        if ("blob".equalsIgnoreCase(uri.getScheme())) {
+            // קבצים שנוצרו בדף עצמו (גיבוי, ייצוא): נשלפים מהדף ונשמרים דרך הגשר.
+            downloadBlob(url, URLUtil.guessFileName(url, contentDisposition, mimeType), mimeType);
+            return;
+        }
+        // עוגיות נשלחות רק לדומיין המוגדר; data: אינו נתמך.
         if (!isTrusted(uri)) {
             if ("http".equalsIgnoreCase(uri.getScheme()) || "https".equalsIgnoreCase(uri.getScheme())) {
                 openExternal(uri);
@@ -505,7 +519,13 @@ public class MainActivity extends ComponentActivity {
             req.setTitle(fileName);
             req.setDescription(getString(R.string.download_notification));
             req.setNotificationVisibility(DownloadManager.Request.VISIBILITY_VISIBLE_NOTIFY_COMPLETED);
-            req.setDestinationInExternalPublicDir(Environment.DIRECTORY_DOWNLOADS, fileName);
+            if (Build.VERSION.SDK_INT < Build.VERSION_CODES.Q
+                    && ContextCompat.checkSelfPermission(this, Manifest.permission.WRITE_EXTERNAL_STORAGE)
+                    != PackageManager.PERMISSION_GRANTED) {
+                req.setDestinationInExternalFilesDir(this, Environment.DIRECTORY_DOWNLOADS, fileName);
+            } else {
+                req.setDestinationInExternalPublicDir(Environment.DIRECTORY_DOWNLOADS, fileName);
+            }
 
             DownloadManager dm = (DownloadManager) getSystemService(Context.DOWNLOAD_SERVICE);
             if (dm == null) throw new IllegalStateException("DownloadManager unavailable");
@@ -514,6 +534,69 @@ public class MainActivity extends ComponentActivity {
         } catch (Exception e) {
             toast(getString(R.string.download_error));
         }
+    }
+
+    private void downloadBlob(String blobUrl, String fileName, String mime) {
+        if (!trustedPage || webView == null) {
+            toast(getString(R.string.download_unsupported));
+            return;
+        }
+        String type = (mime == null || mime.isEmpty()) ? "application/octet-stream" : mime;
+        String js = "(function(){var n=" + JSONObject.quote(fileName) + ",t=" + JSONObject.quote(type) + ";"
+                + "function f(b){" + BRIDGE_NAME + ".saveBase64File(n,t,b);}"
+                + "try{var x=new XMLHttpRequest();x.open('GET'," + JSONObject.quote(blobUrl) + ",true);"
+                + "x.responseType='blob';"
+                + "x.onload=function(){var r=new FileReader();"
+                + "r.onloadend=function(){var s=String(r.result||'');f(s.substring(s.indexOf(',')+1));};"
+                + "r.onerror=function(){f('');};r.readAsDataURL(x.response);};"
+                + "x.onerror=function(){f('');};x.send();}catch(e){f('');}})();";
+        webView.evaluateJavascript(js, null);
+    }
+
+    private static String sanitizeFileName(String name) {
+        String n = name == null ? "" : name.replaceAll("[\\\\/:*?\"<>|\\u0000-\\u001f]", "_").trim();
+        while (n.startsWith(".")) n = n.substring(1);
+        if (n.length() > 120) n = n.substring(n.length() - 120);
+        return n.isEmpty() ? "download" : n;
+    }
+
+    /** שומר לתיקיית ההורדות (MediaStore ב-Android 10+, אחרת לתיקיית ההורדות של האפליקציה). */
+    private String saveToDownloads(String name, String mime, byte[] bytes) throws IOException {
+        String safe = sanitizeFileName(name);
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q) {
+            ContentResolver cr = getContentResolver();
+            ContentValues v = new ContentValues();
+            v.put(MediaStore.MediaColumns.DISPLAY_NAME, safe);
+            v.put(MediaStore.MediaColumns.MIME_TYPE, mime);
+            v.put(MediaStore.MediaColumns.RELATIVE_PATH, Environment.DIRECTORY_DOWNLOADS);
+            v.put(MediaStore.MediaColumns.IS_PENDING, 1);
+            Uri item = cr.insert(MediaStore.Downloads.EXTERNAL_CONTENT_URI, v);
+            if (item == null) throw new IOException("insert failed");
+            try (OutputStream os = cr.openOutputStream(item)) {
+                if (os == null) throw new IOException("no stream");
+                os.write(bytes);
+            } catch (IOException e) {
+                cr.delete(item, null, null);
+                throw e;
+            }
+            ContentValues done = new ContentValues();
+            done.put(MediaStore.MediaColumns.IS_PENDING, 0);
+            cr.update(item, done, null, null);
+            return safe;
+        }
+        File dir = getExternalFilesDir(Environment.DIRECTORY_DOWNLOADS);
+        if (dir == null) throw new IOException("no storage");
+        //noinspection ResultOfMethodCallIgnored
+        dir.mkdirs();
+        File out = new File(dir, safe);
+        int dot = safe.lastIndexOf('.');
+        String base = dot > 0 ? safe.substring(0, dot) : safe;
+        String ext = dot > 0 ? safe.substring(dot) : "";
+        for (int i = 1; out.exists() && i < 1000; i++) out = new File(dir, base + " (" + i + ")" + ext);
+        try (FileOutputStream fos = new FileOutputStream(out)) {
+            fos.write(bytes);
+        }
+        return out.getName();
     }
 
     private void openExternal(Uri uri) {
@@ -649,6 +732,24 @@ public class MainActivity extends ComponentActivity {
             if (!trustedPage || message == null || message.isEmpty()) return;
             final String text = message.length() > 200 ? message.substring(0, 200) : message;
             runOnUiThread(() -> Toast.makeText(MainActivity.this, text, Toast.LENGTH_SHORT).show());
+        }
+
+        /** נקרא מהדף עם תוכן קובץ (base64) שנוצר בדף – גיבוי/ייצוא. */
+        @JavascriptInterface
+        public void saveBase64File(String fileName, String mime, String base64) {
+            if (!trustedPage) return;
+            if (base64 == null || base64.isEmpty() || base64.length() > 100_000_000) {
+                runOnUiThread(() -> toast(getString(R.string.download_error)));
+                return;
+            }
+            final String type = (mime == null || mime.isEmpty()) ? "application/octet-stream" : mime;
+            try {
+                byte[] bytes = Base64.decode(base64, Base64.DEFAULT);
+                final String saved = saveToDownloads(fileName, type, bytes);
+                runOnUiThread(() -> toast(getString(R.string.download_started, saved)));
+            } catch (Exception e) {
+                runOnUiThread(() -> toast(getString(R.string.download_error)));
+            }
         }
 
         @JavascriptInterface
