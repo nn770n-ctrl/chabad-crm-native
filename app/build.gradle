@@ -1,0 +1,60 @@
+plugins {
+    id 'com.android.application'
+}
+
+def serverUrl = (project.findProperty('SERVER_URL') ?: '').toString().trim()
+if (!serverUrl.startsWith('https://') || serverUrl.contains('"') || serverUrl.contains('\\')) {
+    throw new GradleException("SERVER_URL must be a valid https:// URL, got: '${serverUrl}'")
+}
+
+def keystoreFile = System.getenv('KEYSTORE_FILE')
+def hasReleaseKey = keystoreFile && file(keystoreFile).exists()
+
+android {
+    namespace 'org.chabad.neveyosef.crm'
+    compileSdk 35
+
+    defaultConfig {
+        applicationId 'org.chabad.neveyosef.crm'
+        minSdk 26
+        targetSdk 35
+        versionCode 3
+        versionName '3.0.0'
+        buildConfigField 'String', 'DEFAULT_SERVER_URL', "\"${serverUrl}\""
+    }
+
+    buildFeatures {
+        buildConfig true
+    }
+
+    signingConfigs {
+        if (hasReleaseKey) {
+            release {
+                storeFile file(keystoreFile)
+                storePassword System.getenv('KEYSTORE_PASSWORD')
+                keyAlias System.getenv('KEY_ALIAS')
+                keyPassword System.getenv('KEY_PASSWORD')
+            }
+        }
+    }
+
+    buildTypes {
+        release {
+            minifyEnabled true
+            shrinkResources true
+            proguardFiles getDefaultProguardFile('proguard-android-optimize.txt'), 'proguard-rules.pro'
+            // ללא מפתח release מוגדר – חתימת debug, כדי שה-APK יהיה תמיד ניתן להתקנה.
+            signingConfig hasReleaseKey ? signingConfigs.release : signingConfigs.debug
+        }
+    }
+
+    compileOptions {
+        sourceCompatibility JavaVersion.VERSION_17
+        targetCompatibility JavaVersion.VERSION_17
+    }
+}
+
+dependencies {
+    implementation 'androidx.activity:activity:1.9.3'
+    implementation 'androidx.core:core:1.13.1'
+}
