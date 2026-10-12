@@ -333,7 +333,9 @@ public class MainActivity extends ComponentActivity {
 
         CookieManager cookies = CookieManager.getInstance();
         cookies.setAcceptCookie(true);
-        cookies.setAcceptThirdPartyCookies(wv, false);
+        // דרוש לשרתי AI Studio / Cloud Run, שבודקים עוגיית אבטחה של צד שלישי ("Cookie check").
+        // הדף הראשי עצמו מוגבל לדומיין המוגדר בלבד (ראה isTrusted).
+        cookies.setAcceptThirdPartyCookies(wv, true);
 
         wv.addJavascriptInterface(new NativeBridge(), BRIDGE_NAME);
         wv.setWebViewClient(new CrmWebViewClient());
@@ -519,7 +521,9 @@ public class MainActivity extends ComponentActivity {
             startActivity(new Intent(Intent.ACTION_VIEW, uri)
                     .addCategory(Intent.CATEGORY_BROWSABLE));
         } catch (ActivityNotFoundException e) {
-            toast(getString(R.string.external_app_missing));
+            boolean web = "http".equalsIgnoreCase(uri.getScheme()) || "https".equalsIgnoreCase(uri.getScheme());
+            toast(getString(web ? R.string.browser_missing : R.string.external_app_missing)
+                    + (web ? "\n" + uri.getHost() : ""));
         }
     }
 

@@ -17,6 +17,7 @@
     <string name="cancel">ביטול</string>
     <string name="reset_default">איפוס לברירת מחדל</string>
     <string name="invalid_url">כתובת לא תקינה. יש להזין כתובת HTTPS מלאה, למשל https://crm.example.org</string>
+    <string name="browser_missing">לא נמצא דפדפן במכשיר לפתיחת הקישור</string>
     <string name="file_chooser_title">בחר קובץ</string>
     <string name="external_app_missing">יישום חיצוני אינו מותקן במכשיר זה</string>
     <string name="download_started">מוריד קובץ לתיקיית ההורדות: %1$s</string>
